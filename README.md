@@ -5,6 +5,14 @@ push a "movie AI assistant" vibe on my Linux desktop. It's held together with ta
 machine, and it will probably not work on yours without some fiddling. Mostly AI-assisted code, not
 maintained, but feel free to steal ideas from it.
 
+![The Jarvis face talking, in front of northern lights and falling snow](docs/jarvis.png)
+
+<details>
+<summary>The other face (it switches when a female voice is speaking)</summary>
+
+![The alternate face in purple](docs/jarvis-alt.png)
+</details>
+
 ## What it does
 
 - **"Hey Jarvis" wake word.** Always listening (locally, with openWakeWord). Say it, hear a chime, and a fresh
