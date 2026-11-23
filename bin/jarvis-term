@@ -1,0 +1,23 @@
+#!/bin/bash
+# Open a gnome-terminal docked on the right side of the screen, so the
+# Jarvis face (which dodges windows to the left) stays visible.
+# Usage: jarvis-term [TITLE] [-- command args...]
+title="${1:-Jarvis}"; [ $# -gt 0 ] && shift
+[ "$1" = "--" ] && shift
+before=$(xdotool search --onlyvisible --class gnome-terminal 2>/dev/null | sort)
+if [ $# -gt 0 ]; then
+  setsid gnome-terminal --title "$title" -- "$@" </dev/null >/dev/null 2>&1
+else
+  setsid gnome-terminal --title "$title" </dev/null >/dev/null 2>&1
+fi
+read sw sh <<G
+$(xdotool getdisplaygeometry)
+G
+for i in $(seq 40); do
+  new=$(xdotool search --onlyvisible --class gnome-terminal 2>/dev/null | sort | comm -13 <(echo "$before") - 2>/dev/null | tail -1)
+  [ -n "$new" ] && break
+  sleep 0.1
+done
+[ -z "$new" ] && exit 0
+w=$((sw * 45 / 100)); h=$((sh * 55 / 100))
+xdotool windowsize "$new" "$w" "$h" windowmove "$new" $((sw - w - 40)) $((sh * 12 / 100))

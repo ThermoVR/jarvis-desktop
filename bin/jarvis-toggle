@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Super+J: turn the "Hey Jarvis" wake word off (also ends a running session) or back on.
+dir="$HOME/.local/share/hey-claude"
+pids=$(pgrep -f "hey-claude/hey_claude\.py$")   # anchored: only the listener
+if [ -n "$pids" ]; then
+  kill $pids 2>/dev/null
+  "$HOME/.local/bin/jarvis-kill" >/dev/null 2>&1
+  notify-send -a Jarvis -i microphone-sensitivity-muted "Jarvis OFF" "Wake word disabled. Super+J to turn it back on."
+  echo "$(date '+%F %T') wake word turned OFF (Super+J)" >> "$dir/logs/listener.log"
+else
+  (cd "$dir" && setsid sh -c 'exec ./hey_claude.py >> logs/listener.log 2>&1' </dev/null >/dev/null 2>&1 &)
+  notify-send -a Jarvis -i audio-input-microphone "Jarvis ON" "Listening for \"Hey Jarvis\"."
+fi

@@ -1,0 +1,389 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = "==3.11.*"
+# dependencies = ["moderngl", "glfw", "pillow"]
+# ///
+"""jarvis-enhance [X Y] -- the "ENHANCE!" easter egg.
+
+Freezes the monitor under the mouse pointer (or under screen pixel X Y), then plays a full-screen
+movie-style enhance sequence on the GPU: targeting brackets lock on, the view zooms 2x / 4x / 8x,
+each zoom starts blocky and an "enhance" scan line sweeps down to sharpen it. Press any key or
+click to dismiss (Esc aborts at any time).
+
+Prints the path of the enhanced close-up PNG (~/Pictures/Jarvis/enhance-*.png) right away, so
+Jarvis can describe it while the animation plays. The animation runs in a detached process.
+"""
+import math, os, re, struct, subprocess, sys, time, wave
+from pathlib import Path
+
+LEVELS = (2, 4, 8)
+RUN = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp"))
+LOCK = RUN / "jarvis-enhance.pid"
+SFX = Path.home() / ".cache/hey-claude/enhance-sfx"
+OUT = Path.home() / "Pictures/Jarvis"
+
+
+def boxes(W, H, px, py):
+    """Nested zoom boxes (x0, y0, w, h) in monitor pixels, centred on the target, clamped."""
+    out = []
+    for z in LEVELS:
+        w, h = W / z, H / z
+        cx = min(max(px, w / 2), W - w / 2)
+        cy = min(max(py, h / 2), H - h / 2)
+        out.append((cx - w / 2, cy - h / 2, w, h))
+    return out
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+# ----------------------------------------------------------------------------- launcher
+def launch(args):
+    os.environ.setdefault("DISPLAY", ":0")
+    try:
+        if alive(int(LOCK.read_text())):
+            return  # already enhancing
+    except (OSError, ValueError):
+        pass
+    if len(args) >= 2:
+        px, py = int(float(args[0])), int(float(args[1]))
+    else:
+        loc = subprocess.run(["xdotool", "getmouselocation", "--shell"], capture_output=True, text=True).stdout
+        v = dict(l.split("=", 1) for l in loc.split() if "=" in l)
+        px, py = int(v.get("X", 0)), int(v.get("Y", 0))
+    mons = []
+    for line in subprocess.run(["xrandr", "--listactivemonitors"], capture_output=True, text=True).stdout.splitlines():
+        m = re.search(r"(\d+)/\d+x(\d+)/\d+\+(\d+)\+(\d+)", line)
+        if m:
+            w, h, x, y = map(int, m.groups())
+            mons.append((x, y, w, h))
+    mx, my, W, H = next((m for m in mons if m[0] <= px < m[0] + m[2] and m[1] <= py < m[1] + m[3]),
+                        mons[0] if mons else (0, 0, 1920, 1080))
+    src = RUN / "jarvis-enhance-src.png"
+    subprocess.run(["maim", "-u", "-g", f"{W}x{H}+{mx}+{my}", str(src)], check=True)
+    rx, ry = min(max(px - mx, 0), W - 1), min(max(py - my, 0), H - 1)
+    log = open(Path.home() / ".local/share/hey-claude/logs/enhance.log", "a")
+    subprocess.Popen([sys.executable, os.path.abspath(__file__), "--overlay", str(src), str(mx), str(my),
+                      str(rx), str(ry)], start_new_session=True, stdout=log, stderr=log, stdin=subprocess.DEVNULL)
+
+    from PIL import Image, ImageFilter
+    im = Image.open(src).convert("RGB")
+    x0, y0, w, h = boxes(W, H, rx, ry)[-1]
+    crop = im.crop((round(x0), round(y0), round(x0 + w), round(y0 + h)))
+    big = crop.resize((crop.width * 4, crop.height * 4), Image.LANCZOS)
+    big = big.filter(ImageFilter.UnsharpMask(radius=2, percent=110, threshold=2))
+    OUT.mkdir(parents=True, exist_ok=True)
+    path = OUT / time.strftime("enhance-%Y%m%d-%H%M%S.png")
+    big.save(path)
+    print(path)
+
+
+# ----------------------------------------------------------------------------- sound
+def sfx():
+    SFX.mkdir(parents=True, exist_ok=True)
+    rate = 44100
+
+    def write(name, parts):
+        p = SFX / f"{name}.wav"
+        if p.exists():
+            return p
+        frames = bytearray()
+        for f0, f1, dur, amp, trem in parts:
+            n = int(rate * dur)
+            ph = 0.0
+            for i in range(n):
+                u = i / n
+                f = f0 * (f1 / f0) ** u if f0 else 0
+                ph += 2 * math.pi * f / rate
+                env = min(1, i / 300, (n - i) / 600)
+                a = amp * env * (1 - trem + trem * (0.5 + 0.5 * math.sin(2 * math.pi * 22 * i / rate)))
+                s = math.sin(ph) + 0.25 * math.sin(3 * ph)
+                frames += struct.pack("<h", int(max(-1, min(1, s * a)) * 32000))
+        with wave.open(str(p), "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate); w.writeframes(bytes(frames))
+        return p
+
+    return {
+        "lock": write("lock", [(1320, 1320, .05, .22, 0), (0, 0, .03, 0, 0), (1760, 1760, .07, .22, 0)]),
+        "sweep": write("sweep", [(260, 1500, .7, .13, .6)]),
+        "done": write("done", [(880, 880, .06, .2, 0), (1320, 1320, .06, .2, 0), (1760, 1760, .09, .2, 0)]),
+        "final": write("final", [(660, 660, .08, .2, 0), (990, 990, .08, .2, 0), (1320, 1320, .08, .2, 0),
+                                 (1980, 1980, .22, .2, 0)]),
+        "out": write("out", [(1400, 300, .3, .12, 0)]),
+    }
+
+
+# ----------------------------------------------------------------------------- overlay
+FRAG = """
+#version 330
+uniform sampler2D img; uniform sampler2D hud;
+uniform vec2 res; uniform vec2 texsz; uniform vec4 view;
+uniform float fx, block, reveal, sharp, boxa, time, flash, prog, ca, hudA;
+uniform vec4 box; uniform vec2 tgt;
+out vec4 o;
+vec3 samp(vec2 s, float B){
+  vec2 p = s*res;
+  if (B > 1.01) p = (floor(p/B)+.5)*B;
+  vec2 uv = view.xy + p/res*view.zw;
+  vec3 c = texture(img, uv).rgb;
+  if (B <= 1.01 && sharp > 0.) {
+    vec2 t = 1./texsz;
+    vec3 b = (texture(img,uv+t).rgb + texture(img,uv-t).rgb
+            + texture(img,uv+vec2(t.x,-t.y)).rgb + texture(img,uv+vec2(-t.x,t.y)).rgb)*.25;
+    c = clamp(c + sharp*(c-b), 0., 1.);
+  }
+  return c;
+}
+void main(){
+  vec2 p = vec2(gl_FragCoord.x, res.y-gl_FragCoord.y);
+  vec2 s = p/res;
+  float S = res.y/1080.;
+  float B = (s.y < reveal) ? 1. : block;
+  vec3 c;
+  if (ca > .001) { vec2 d = (s-.5)*ca*.02; c = vec3(samp(s+d,B).r, samp(s,B).g, samp(s-d,B).b); }
+  else c = samp(s,B);
+  vec3 raw = c;
+  vec3 cy = vec3(.25,.9,1.);
+  float L = dot(c, vec3(.299,.587,.114));
+  vec3 g = mix(c, L*vec3(.55,.95,1.15), .45)*.92;
+  g *= .93 + .07*sin(p.y*3.14159/(1.5*S));
+  vec2 v = s-.5; g *= 1. - dot(v,v)*.9;
+  float gs = 96.*S; vec2 gm = abs(fract(p/gs+.5)-.5)*gs;
+  g += cy*.06*step(min(gm.x,gm.y), .8*S);
+  float ch = max(step(abs(p.x-tgt.x), .8*S), step(abs(p.y-tgt.y), .8*S)) * step(.5, fract((p.x+p.y)/(12.*S)));
+  g += cy*.18*ch*boxa;
+  float rr = abs(length(p-tgt) - 22.*S);
+  float ang = atan(p.y-tgt.y, p.x-tgt.x);
+  g += cy*.9*smoothstep(1.8*S,.6*S,rr)*step(.3, fract(ang/6.2832*8.+time*.6))*boxa;
+  vec2 bc = (box.xy+box.zw)*.5, bh = (box.zw-box.xy)*.5;
+  vec2 q = abs(p-bc)-bh;
+  float sd = length(max(q,0.)) + min(max(q.x,q.y),0.);
+  float cl = .22*min(bh.x,bh.y);
+  vec2 e = bh - abs(p-bc);
+  float corner = step(e.x, cl)*step(e.y, cl);
+  g += cy*(smoothstep(2.6*S, 1.2*S, abs(sd)) + .35*exp(-abs(sd)/(7.*S)))*corner*boxa;
+  if (reveal > 0. && reveal < 1.) {
+    float dl = p.y - reveal*res.y;
+    g += cy*(smoothstep(2.*S, 0., abs(dl)) + .5*exp(-abs(dl)/(14.*S)) + .12*exp(dl/(60.*S))*step(dl,0.));
+  }
+  if (prog >= 0.) {
+    vec2 b0 = vec2(res.x*.35, res.y*.875), b1 = vec2(res.x*.65, res.y*.875+6.*S);
+    if (p.x>b0.x && p.x<b1.x && p.y>b0.y && p.y<b1.y)
+      g = mix(g, cy*(p.x < mix(b0.x,b1.x,prog) ? 1. : .2), .85);
+  }
+  float gl = 0.;
+  for (int i=0;i<8;i++){ float a=float(i)*.785; gl += texture(hud, s+vec2(cos(a),sin(a))*4.*S/res).a; }
+  g += cy*gl/8.*.55*hudA;
+  vec4 h = texture(hud, s);
+  g = mix(g, h.rgb, h.a*hudA);
+  g += vec3(.6,.95,1.)*flash;
+  g += (fract(sin(dot(p+fract(time)*91., vec2(12.9898,78.233)))*43758.5453)-.5)*.035;
+  o = vec4(mix(raw, g, fx), 1.);
+}
+"""
+VERT = """
+#version 330
+void main(){ vec2 p = vec2((gl_VertexID<<1)&2, gl_VertexID&2); gl_Position = vec4(p*2.-1., 0., 1.); }
+"""
+
+
+def make_huds(W, H, tx, ty):
+    import random
+    from PIL import Image, ImageDraw, ImageFont
+    S = H / 1080
+    font = lambda sz, b: ImageFont.truetype(f"/usr/share/fonts/noto/NotoSansMono-{'Bold' if b else 'Regular'}.ttf",
+                                            max(8, int(sz * S)))
+    ftitle, fsmall, fbig = font(26, True), font(15, False), font(54, True)
+    col, dim = (110, 235, 255, 255), (110, 235, 255, 170)
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    sector = f"SECTOR {random.randrange(16**4):04X}-{random.choice('ABCDEF')}{random.randrange(10)}"
+
+    def hud(big=None, sub=None, telemetry=()):
+        im = Image.new("RGBA", (W, H), (110, 235, 255, 0))
+        d = ImageDraw.Draw(im)
+        k = dict(stroke_width=max(1, int(2 * S)), stroke_fill=(0, 20, 30, 200))
+        d.text((40 * S, 34 * S), "J.A.R.V.I.S  //  IMAGE ENHANCEMENT", font=ftitle, fill=col, **k)
+        d.text((40 * S, 72 * S), f"SOURCE {W}x{H}   TARGET {tx},{ty}", font=fsmall, fill=dim, **k)
+        for i, t in enumerate((stamp, sector)):
+            d.text((W - 40 * S - d.textlength(t, font=fsmall), (38 + 22 * i) * S), t, font=fsmall, fill=dim, **k)
+        for i, t in enumerate(telemetry):
+            d.text((40 * S, H - (60 + 22 * (len(telemetry) - 1 - i)) * S), t, font=fsmall, fill=dim, **k)
+        if big:
+            d.text(((W - d.textlength(big, font=fbig)) / 2, H * .79), big, font=fbig, fill=col, **k)
+        if sub:
+            d.text(((W - d.textlength(sub, font=fsmall)) / 2, H * .895), sub, font=fsmall, fill=dim, **k)
+        return im.tobytes()
+
+    subs = ("INTERPOLATING SUBPIXEL DATA", "RECONSTRUCTING EDGES", "NEURAL UPSCALE  //  DENOISE")
+    out = [hud(sub="ACQUIRING TARGET")]
+    for i, z in enumerate(LEVELS):
+        out.append(hud(f"ENHANCE  ×{z}", subs[i],
+                       (f"ZOOM ×{z}   {W // z}x{H // z} px", f"PSNR {random.uniform(24, 38):.1f} dB",
+                        f"CONFIDENCE {random.uniform(.81, .99):.0%}")))
+    out.append(hud("ENHANCEMENT COMPLETE", "press any key", (f"ZOOM ×{LEVELS[-1]}", "IMAGE SAVED")))
+    return out
+
+
+def ease(u):
+    u = min(max(u, 0.0), 1.0)
+    return u * u * u * (u * (u * 6 - 15) + 10)
+
+
+def lerp(a, b, u):
+    return a + (b - a) * u
+
+
+def view_lerp(a, b, u):
+    """Interpolate view rects; size geometrically so the zoom speed feels constant."""
+    w = a[2] * (b[2] / a[2]) ** u
+    k = (a[2] - w) / (a[2] - b[2]) if a[2] != b[2] else u
+    return (lerp(a[0], b[0], k), lerp(a[1], b[1], k), w, a[3] * (b[3] / a[3]) ** u)
+
+
+def overlay(src, mx, my, tx, ty):
+    import glfw, moderngl
+    from PIL import Image
+    LOCK.write_text(str(os.getpid()))
+    try:
+        mx, my, tx, ty = int(mx), int(my), int(tx), int(ty)
+        snd = sfx()
+        play = lambda n: subprocess.Popen(["paplay", str(snd[n])], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        im = Image.open(src).convert("RGB")
+        W, H = im.size
+        glfw.init()
+        mon = next((m for m in glfw.get_monitors() if glfw.get_monitor_pos(m) == (mx, my)), glfw.get_primary_monitor())
+        mode = glfw.get_video_mode(mon)
+        for hint, val in ((glfw.CONTEXT_VERSION_MAJOR, 3), (glfw.CONTEXT_VERSION_MINOR, 3),
+                          (glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE), (glfw.AUTO_ICONIFY, False),
+                          (glfw.RED_BITS, mode.bits.red), (glfw.GREEN_BITS, mode.bits.green),
+                          (glfw.BLUE_BITS, mode.bits.blue), (glfw.REFRESH_RATE, mode.refresh_rate)):
+            glfw.window_hint(hint, val)
+        win = glfw.create_window(mode.size.width, mode.size.height, "ENHANCE", mon, None)
+        glfw.make_context_current(win)
+        glfw.swap_interval(1)
+        glfw.set_input_mode(win, glfw.CURSOR, glfw.CURSOR_HIDDEN)
+        ctx = moderngl.create_context()
+        prog = ctx.program(vertex_shader=VERT, fragment_shader=FRAG)
+        vao = ctx.vertex_array(prog, [])
+        tex = ctx.texture((W, H), 3, im.tobytes(), alignment=1)
+        tex.repeat_x = tex.repeat_y = False
+        huds = make_huds(W, H, tx + mx, ty + my)
+        htex = ctx.texture((W, H), 4, huds[0])
+        htex.repeat_x = htex.repeat_y = False
+        tex.use(0); htex.use(1)
+        prog["img"] = 0; prog["hud"] = 1
+        fw, fh = glfw.get_framebuffer_size(win)
+        prog["res"] = (fw, fh); prog["texsz"] = (W, H)
+
+        full = (0.0, 0.0, 1.0, 1.0)
+        views = [full] + [(x / W, y / H, w / W, h / H) for x, y, w, h in boxes(W, H, tx, ty)]
+        T0, D = 0.7, 2.0
+        T_END = T0 + D * len(LEVELS)
+        state = {"bye": None, "hud": 0}
+
+        def dismiss(*_):
+            if state["bye"] is None:
+                state["bye"] = time.monotonic() - t0
+                play("out")
+
+        def on_key(w, key, sc, action, mods):
+            if action == glfw.PRESS and (key == glfw.KEY_ESCAPE or time.monotonic() - t0 > T_END):
+                dismiss()
+
+        glfw.set_key_callback(win, on_key)
+        glfw.set_mouse_button_callback(win, lambda w, b, a, m: a == glfw.PRESS and time.monotonic() - t0 > T_END and dismiss())
+
+        def to_screen(view, x, y):
+            return ((x / W - view[0]) / view[2] * fw, (y / H - view[1]) / view[3] * fh)
+
+        played = set()
+
+        def once(key, name):
+            if key not in played:
+                played.add(key); play(name)
+
+        t0 = time.monotonic()
+        cur_view = full
+        while not glfw.window_should_close(win):
+            t = time.monotonic() - t0
+            u = dict(fx=ease(t / T0), block=1.0, reveal=-1.0, sharp=.6 * ease(t / T0), boxa=0.0, flash=0.0,
+                     prog=-1.0, ca=0.0, hudA=ease((t - .15) / .4))
+            hud_i = 0
+            view = full
+            if t >= T0:
+                k = min(int((t - T0) // D), len(LEVELS) - 1)
+                lt = t - T0 - k * D
+                prev, nxt = views[k], views[k + 1]
+                bx, by, bw, bh = boxes(W, H, tx, ty)[k]
+                Bk = (10, 16, 22)[k] * fh / 1080
+                if t < T_END:
+                    hud_i = k + 1
+                    if lt < .45:  # brackets lock on
+                        once((k, "lock"), "lock")
+                        view = prev
+                        a = ease(lt / .4)
+                        x0, y0 = to_screen(prev, bx, by); x1, y1 = to_screen(prev, bx + bw, by + bh)
+                        u["box"] = (lerp(0, x0, a), lerp(0, y0, a), lerp(fw, x1, a), lerp(fh, y1, a))
+                        u["boxa"] = 1.0
+                    elif lt < 1.1:  # zoom in, getting blocky
+                        z = ease((lt - .45) / .65)
+                        view = view_lerp(prev, nxt, z)
+                        x0, y0 = to_screen(view, bx, by); x1, y1 = to_screen(view, bx + bw, by + bh)
+                        u["box"] = (x0, y0, x1, y1)
+                        u["boxa"] = 1 - z
+                        u["block"] = lerp(1, Bk, z)
+                        u["ca"] = math.sin(math.pi * z) * 1.5
+                    else:  # enhance sweep
+                        view = nxt
+                        r = (lt - 1.2) / .7
+                        u["block"] = Bk
+                        if r >= 0:
+                            once((k, "sweep"), "sweep")
+                            u["reveal"] = r if r < 1 else 2.0
+                            u["prog"] = min(r, 1)
+                        if r >= 1:
+                            once((k, "done"), "done" if k < len(LEVELS) - 1 else "final")
+                            u["flash"] = .35 * math.exp(-(lt - 1.9) * 12)
+                else:
+                    view = views[-1]
+                    hud_i = len(LEVELS) + 1
+                    u["flash"] = .35 * math.exp(-(t - T_END) * 12) if t - T_END < .5 else 0.0
+                    if t - T_END > 12:
+                        dismiss()
+            if state["bye"] is not None:
+                b = ease((t - state["bye"]) / .4)
+                view = view_lerp(cur_view, full, b)
+                u.update(fx=u["fx"] * (1 - b), hudA=u["hudA"] * (1 - b), block=1.0, reveal=-1.0, boxa=0.0,
+                         prog=-1.0, flash=0.0, sharp=u["sharp"] * (1 - b))
+                if b >= 1:
+                    break
+            else:
+                cur_view = view
+            if hud_i != state["hud"]:
+                htex.write(huds[hud_i]); state["hud"] = hud_i
+            vx = view
+            tgt = to_screen(vx, tx, ty)
+            u.setdefault("box", (0, 0, 0, 0))
+            prog["view"] = vx; prog["tgt"] = tgt; prog["time"] = t
+            for name, val in u.items():
+                prog[name] = val
+            ctx.viewport = (0, 0, fw, fh)
+            vao.render(moderngl.TRIANGLES, vertices=3)
+            glfw.swap_buffers(win)
+            glfw.poll_events()
+        glfw.terminate()
+    finally:
+        LOCK.unlink(missing_ok=True)
+
+
+if __name__ == "__main__":
+    a = sys.argv[1:]
+    if a and a[0] == "--overlay":
+        overlay(*a[1:6])
+    else:
+        launch(a)

@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# jarvis-look [screen|window] — capture the desktop for Jarvis to look at.
+# Prints the path of the PNG. Downscaled so the longest edge is <=1568 px.
+set -euo pipefail
+mode="${1:-screen}"
+out_dir="$HOME/.cache/hey-claude"; mkdir -p "$out_dir"
+out="$out_dir/look-$mode.png"
+export DISPLAY="${DISPLAY:-:0}"
+eval "$(xdotool getdisplaygeometry --shell 2>/dev/null || true)"
+SW=${WIDTH:-1920}; SH=${HEIGHT:-1080}
+x=0; y=0; w=$SW; h=$SH
+if [[ $mode == window ]]; then
+  if wid=$(xdotool getactivewindow 2>/dev/null); then
+    eval "$(xdotool getwindowgeometry --shell "$wid")"
+    x=$X; y=$Y; w=$WIDTH; h=$HEIGHT
+    # clamp to the screen
+    (( x < 0 )) && { w=$((w + x)); x=0; }
+    (( y < 0 )) && { h=$((h + y)); y=0; }
+    (( x + w > SW )) && w=$((SW - x))
+    (( y + h > SH )) && h=$((SH - y))
+  fi
+fi
+w=$((w / 2 * 2)); h=$((h / 2 * 2))
+ffmpeg -loglevel error -y -f x11grab -video_size "${w}x${h}" -i "$DISPLAY+$x,$y" \
+  -frames:v 1 -vf "scale='if(gt(iw,ih),min(1568,iw),-2)':'if(gt(iw,ih),-2,min(1568,ih))'" "$out"
+echo "$out"

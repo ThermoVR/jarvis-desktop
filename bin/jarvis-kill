@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Kill switch (Super+Escape): end any running Jarvis voice session right now.
+# Kills the headless claude session and everything it started (VoiceMode speech + mic).
+echo "$(date "+%F %T") jarvis-kill invoked" >> "$HOME/.local/share/hey-claude/logs/listener.log"
+descendants() { for c in $(pgrep -P "$1"); do descendants "$c"; echo "$c"; done; }
+pids=$(pgrep -f "^claude -p The user just woke you")   # anchored: only the real session
+if [ -z "$pids" ]; then
+  notify-send -a Jarvis -i dialog-information "Jarvis" "No active session."
+  exit 0
+fi
+all=""
+for p in $pids; do all="$all $(descendants "$p") $p"; done
+kill -TERM $all 2>/dev/null
+sleep 1
+kill -KILL $all 2>/dev/null
+notify-send -a Jarvis -i process-stop "Jarvis stopped" "Session ended."
+echo "$(date '+%F %T') kill switch used" >> "$HOME/.local/share/hey-claude/logs/listener.log"

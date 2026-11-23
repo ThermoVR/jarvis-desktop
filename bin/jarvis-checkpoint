@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Append a timestamped checkpoint for the next Jarvis session.
+# Usage: jarvis-checkpoint "summary text"   (or pipe text on stdin)
+# Keeps the newest 30 entries in ~/.local/share/hey-claude/memory/checkpoints.md
+f="$HOME/.local/share/hey-claude/memory/checkpoints.md"
+mkdir -p "$(dirname "$f")"
+text="${*:-$(cat)}"
+[ -z "$text" ] && { echo "nothing to save" >&2; exit 1; }
+printf '\n## %s\n%s\n' "$(date '+%F %H:%M')" "$text" >> "$f"
+# trim to the last 30 entries
+python3 - "$f" <<'EOF'
+import sys, re
+p = sys.argv[1]; s = open(p).read()
+parts = re.split(r'(?m)^(?=## \d{4}-\d\d-\d\d )', s)
+entries = [x for x in parts if x.startswith('## ')]
+if len(entries) > 30:
+    open(p, 'w').write('\n' + ''.join(entries[-30:]).lstrip('\n'))
+EOF
+echo "saved to $f"

@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Hey Claude
+Comment=Wake-word listener that starts a Claude Code voice session
+Exec=/bin/sh -c 'cd "$HOME/.local/share/hey-claude" && exec ./hey_claude.py >> logs/listener.log 2>&1'
+X-GNOME-Autostart-enabled=true

@@ -1,0 +1,3 @@
+# Your location for the live weather and the sky: "LAT LON".
+# Rename to weather.conf and put it in ~/.config/hey-claude/ (never displayed).
+0.00 0.00

@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Hey Claude Face Wallpaper
+Exec=/bin/sh -c 'cd "$HOME/.local/share/hey-claude" && exec ./face_wallpaper.py > logs/face.log 2>&1'
+X-GNOME-Autostart-enabled=true
+NoDisplay=false
